@@ -21,8 +21,12 @@ var yargs = require('yargs')
     describe:"specify a module directory. defaults to your current working directory"
   })
   .option('name',{
-    describe:"set this to 0 if you d not want to also update this module's scope",
+    describe:"set this to 0 if you do not want to also update this module's scope",
     default:true
+  })
+  .option('ignorePaths', {
+    describe: "specify a comma separated list of paths within [dir] to ignore",
+    default:""
   })
   .help('h')
   .alias('h', 'help')
@@ -44,15 +48,35 @@ var scope = argv.scope
 var modules = argv._
 var dir = path.resolve(process.cwd(),argv.dir)
 
+var ignorePaths = [];
+if (argv.ignorePaths.length !== 0){
+  ignorePaths = argv.ignorePaths.split(",");
+  for (var i = 0; i < ignorePaths.length; i++){
+    if (ignorePaths[i].length){
+      // path.join removes extra "/" between paths it's joining
+      ignorePaths[i] = path.join(dir, ignorePaths[i])
+    }
+  }
+}
+
+var scopeName = argv.name
 var dryRun = argv.dry
 var jsonPath = path.join(dir,'package.json')
-var pkg = require(jsonPath)
+var pkg
+
+// make package.json optional
+if(!fs.existsSync(jsonPath)) {
+  pkg = {name:"package"}
+} else {
+  pkg = require(jsonPath)
+}
 
 if(dryRun) ui.banner("     DRY RUN")
 
 // scope or unscope
-var origName = pkg.name
-pkg.name = (scope.length?scope+'/':'')+pkg.name.split('/').pop();
+if (scopeName){
+  pkg.name = (scope.length?scope+'/':'')+pkg.name.split('/').pop();
+}
 // dependencies
 pkg.dependencies = updateDeps(scope,pkg.dependencies||{},modules)
 // devDependencies
@@ -63,7 +87,7 @@ ui.banner('updating package.json name and deps')
 ui.hl(JSON.stringify(pkg,null,'  '),'json')
 
 if(!dryRun){
-  writeAtomic(jsonPath,JSON.stringify(pkg,null,'  '))
+  writeAtomic(jsonPath,JSON.stringify(pkg,null,'  '), function(err){if (err){throw err;}});
 }
 
 var files = {}
@@ -81,6 +105,12 @@ function rewrite(cb){
   walkdir(dir,function(p,stat){
     if(p.substr(p.length-3) !== '.js') return
     if(~p.indexOf('.git') || ~p.indexOf('node_modules')) return
+
+    for (var i = 0; i < ignorePaths.length; i++){
+      if (p.indexOf(ignorePaths[i]) === 0){
+        return;
+      }
+    }
     if(!stat.isFile()) return
     todo.push([p,stat])
   }).on('end',function(){
@@ -99,19 +129,19 @@ function rewrite(cb){
 }
 
 function spawn(a,cb){
-
   var args = ['transform.js','--',scope]
-  args.push.apply(args,modules,{cwd:__dirname})
+  args.push.apply(args,modules,{cwd:path.resolve(__dirname,'..')})
 
   var proc = cp.spawn(rewriteBin,args)
 
-  var rs = fs.createReadStream(a[0])
 
   var file = []
-  proc.stdout.on('data',function(buf){
-    file.push(buf)
-  })
-  proc.stdout.on('end',function(){
+  // wait for stdout end and exit code.
+  var c = 2;
+  var finish = function(err){
+    if(err) throw err;
+    if(--c) return;
+
     var buf = Buffer.concat(file);
 
     ui.banner(a[0])
@@ -123,6 +153,22 @@ function spawn(a,cb){
         cb(err) 
       })   
     } else cb()
+  }
+
+  var rs = fs.createReadStream(a[0])
+
+  proc.on('exit',function(code){
+    var err
+    if(code) err = new Error('bad exit code transforming js: '+code)
+    finish(err)
+  })
+
+  proc.stdout.on('data',function(buf){
+    file.push(buf)
+  })
+
+  proc.stdout.on('end',function(){
+    finish()
   })
 
   proc.stderr.on('data',function(buf){
